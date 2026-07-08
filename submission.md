@@ -73,3 +73,23 @@ SQLAlchemy relationships are used to connect models instead of manually storing 
 The app often converts model objects to dictionaries before returning them from routes. Methods like `Song.to_dict()`, `User.to_dict()`, and `Notification.to_dict()` control exactly what fields appear in API responses and convert datetimes into strings with `isoformat()`.
 
 Database writes usually happen in service functions. The common pattern is to load needed models with `db.session.get(...)`, create or update model objects, add new objects with `db.session.add(...)`, and save changes with `db.session.commit()`.
+
+## Issue #1 - User reports that their streak continues to reset on the turnover from Saturday to Sunday
+
+### How I reproduced it
+
+I ran `pytest tests/test_streaks.py::test_streak_increments_on_sunday`. The test creates a user, calls `update_listening_streak()` with Saturday June 15, 2024, then calls it again with Sunday June 16, 2024. After the Saturday call, the streak is 1. After the Sunday call, the expected streak is 2 because the user listened on consecutive days. The actual value was still/reset to 1, and pytest failed with `assert 1 == 2`. My debug print showed `last_date=2024-06-15, days_since_last=1`, confirming the Sunday call was being treated as one day after the previous listen.
+
+### How I found the root cause
+
+I started in `tests/test_streaks.py` because I noticed failures when running the entire test suite with `pytest`. I also traced the data through the user route back into `get_streak`, where I noticed that the function just queries the existing streak. Since `get_streak` only reads the stored value, I looked into `record_listening_event` and `update_listening_streak` because those are where the streak gets changed. I added a debug statement in `update_listening_streak` because the user story said the user already had a continuous streak. When I ran the Sunday test, the debug statement printed `days_since_last=1`, which matched the expected Saturday-to-Sunday sequence after the first event was registered. That made me focus on the conditionals after that calculation, because the date difference was correct but the streak still reset.
+
+### The root cause
+
+The root cause was in `services/streak_service.py` on line 74. The composite conditional with `today.weekday()` did not match the intended behavior from the docstring. The condition checked whether it had been exactly one day since the user last listened and whether the current date was not Sunday: `days_since_last == 1 and today.weekday() != 6`. In Python, `weekday()` returns `6` for Sunday. That meant a valid Saturday-to-Sunday listen had `days_since_last == 1`, but still failed the increment condition because Sunday made `today.weekday() != 6` false. The code then fell into the reset branch instead of incrementing the streak.
+
+### My fix and side-effect check
+
+I removed `and today.weekday() != 6` so the condition became `elif days_since_last == 1:`. This matches the stated rule that listening on the next calendar day should increment the streak, regardless of which weekday it is.
+
+After the fix, I reran `pytest tests/test_streaks.py::test_streak_increments_on_sunday`, and it passed with `1 passed`. I also ran the full test suite with `pytest`. The streak tests all passed, and the full suite reported `11 passed` and `2 failed`. The two remaining failures were in `tests/test_playlists.py`, so they were separate from the streak change. I removed the debug print after confirming the fix.
