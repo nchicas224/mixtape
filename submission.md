@@ -93,3 +93,23 @@ The root cause was in `services/streak_service.py` on line 74. The composite con
 I removed `and today.weekday() != 6` so the condition became `elif days_since_last == 1:`. This matches the stated rule that listening on the next calendar day should increment the streak, regardless of which weekday it is.
 
 After the fix, I reran `pytest tests/test_streaks.py::test_streak_increments_on_sunday`, and it passed with `1 passed`. I also ran the full test suite with `pytest`. The streak tests all passed, and the full suite reported `11 passed` and `2 failed`. The two remaining failures were in `tests/test_playlists.py`, so they were separate from the streak change. I removed the debug print after confirming the fix.
+
+## Issue #2 - Friends from yesterday evening still appear in Listening Now
+
+### How I reproduced it
+
+I created a new test suite in `tests/test_feed.py`, set up pytest fixtures, and wrote a test function for the desired Listening Now behavior. I injected the `monkeypatch` fixture so I could patch `datetime` in `services/feed_service.py`. The monkeypatch made the feed service use a fake current time of June 16, 2024 at 9:00 AM UTC. In the test data, I created a current user, a friend, a friendship between them, a song, and a `ListeningEvent` where the friend listened at 11:00 PM UTC on June 15, 2024. I expected the feed to return an empty list because that listen happened yesterday. Before the fix, the function returned the friend in the list from `ListeningEvent` results.
+
+### How I found the root cause
+
+After tracing the request from `routes/feed.py` back to `get_friends_listening_now()` in `services/feed_service.py`, I noticed that the `ListeningEvent` query was filtered with a `cutoff` variable. That cutoff was calculated by subtracting the global `RECENT_THRESHOLD` from `datetime.now(timezone.utc)`. Since the user story described a midnight turnover problem, I focused on `RECENT_THRESHOLD` and the cutoff calculation. I wrote a test with mock data and monkeypatching to solidify the bug. The test reproduced the issue, which confirmed that the bug lived inside `get_friends_listening_now()` rather than in the route or the friendship setup.
+
+### The root cause
+
+When `RECENT_THRESHOLD` is set to `timedelta(hours=24)`, the feed uses a rolling 24-hour window without accounting for midnight turnover. At the fake current time of June 16, 2024 at 9:00 AM UTC, the cutoff becomes June 15, 2024 at 9:00 AM UTC. The friend's listen at June 15, 2024 at 11:00 PM UTC is later than that cutoff, so it passes the `ListeningEvent.listened_at >= cutoff` filter even though it happened yesterday. The user story expected Listening Now to show friends who listened today, not any friend who listened within the last 24 hours.
+
+### My fix and side-effect check
+
+I removed `RECENT_THRESHOLD` because the feed should not use a rolling 24-hour window. I also removed the `cutoff` variable and replaced it with a `start_of_today` threshold created from the current datetime. The `ListeningEvent` query still filters by friend user IDs, but now it checks `ListeningEvent.listened_at >= start_of_today` so only events from the current calendar day are included.
+
+After the fix, I reran `pytest tests/test_feed.py::test_feed_shows_correct_friends_listening_now`, and it passed with `1 passed`. I also ran the full test suite with `pytest`. The feed test passed, and the full suite reported `12 passed` and `2 failed`. The two remaining failures were in `tests/test_playlists.py`, so they were separate from the feed change.
