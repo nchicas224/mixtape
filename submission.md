@@ -1,5 +1,17 @@
 # Mixtape Codebase Map
 
+## AI Usage
+
+I used AI as a debugging and code-reading partner during this project. I asked it to explain Flask-SQLAlchemy concepts I was unsure about, including `db.session.flush()`, how `db.session.add_all()` knows which table to insert into, how model fields map to database columns, what `to_dict()` is used for, why `app.app_context()` is needed before `db.create_all()`, and how SQLAlchemy relationship loading works with the `lazy` parameter.
+
+I also used AI to help trace routes into service functions. For example, I asked it to walk through how `GET /feed/<user_id>/listening-now` reaches `get_friends_listening_now()`, how `POST /songs/<song_id>/rate` reaches `rate_song()`, and how the playlist notification flow compares to the rating flow. This helped me understand the app's route-service-model pattern before changing service code.
+
+AI helped me design focused tests, especially for the feed and notification bugs. It explained how to use `monkeypatch` to control `datetime.now()` in `feed_service.py`, how to set up users, songs, friendships, and listening events in pytest, and how to assert that a notification was created by `rate_song()` without manually creating the notification inside the test.
+
+I still verified the important behavior myself by running the tests and checking the failures before fixing the code. For the streak bug, I added a debug print and confirmed that `days_since_last` was `1` before narrowing the issue to the Sunday conditional. For the feed bug, I wrote a test with a fake current time and confirmed that an event from the previous night was still included. For the notification bug, I wrote a test that failed because no notification was created after a friend rated a shared song.
+
+There was also a case where the AI explanation was incomplete until I verified the behavior myself. For Issue #3, the user story said multi-tag songs appeared multiple times in search results, and the AI initially explained how an outer join could create duplicate raw SQL rows. After I ran the existing search test and a manual curl request, the bug was not reproducible in the current code. Another developer confirmed that the duplicate issue happened when the query selected two models instead of only `Song`. That helped clarify that the database join can create repeated rows, but SQLAlchemy may collapse duplicates when the query only returns `Song` entities. Because I could not reproduce Issue #3 in this branch, I skipped it and worked on a reproducible notification bug instead.
+
 ## Main Files
 
 `app.py` is the Flask application factory. It creates the app, sets the database configuration, connects SQLAlchemy with `db.init_app(app)`, registers the route blueprints, and calls `db.create_all()` inside an app context so the database tables exist before requests are handled.
@@ -133,3 +145,7 @@ The root cause was that `rate_song()` saved the rating but did not create a noti
 I added notification creation to `rate_song()` after the rating is saved. The function now checks that the rater is not the original sharer with `if song.shared_by != user_id:` and then calls `create_notification(...)` for `user_id=song.shared_by`. This sends the notification to the original sharer instead of the rater.
 
 After the fix, I reran `pytest tests/test_notifications.py::test_notification_sent_after_song_rating`, and it passed with `1 passed`. I also ran the full test suite with `pytest`. The notification test passed, and the full suite reported `13 passed` and `2 failed`. The two remaining failures were in `tests/test_playlists.py`, so they were separate from the notification change.
+
+### Gitlog Screenshot
+
+![alt text](image.png)
