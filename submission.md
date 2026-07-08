@@ -113,3 +113,23 @@ When `RECENT_THRESHOLD` is set to `timedelta(hours=24)`, the feed uses a rolling
 I removed `RECENT_THRESHOLD` because the feed should not use a rolling 24-hour window. I also removed the `cutoff` variable and replaced it with a `start_of_today` threshold created from the current datetime. The `ListeningEvent` query still filters by friend user IDs, but now it checks `ListeningEvent.listened_at >= start_of_today` so only events from the current calendar day are included.
 
 After the fix, I reran `pytest tests/test_feed.py::test_feed_shows_correct_friends_listening_now`, and it passed with `1 passed`. I also ran the full test suite with `pytest`. The feed test passed, and the full suite reported `12 passed` and `2 failed`. The two remaining failures were in `tests/test_playlists.py`, so they were separate from the feed change.
+
+## Issue #4 - Rating a shared song does not notify the original sharer
+
+### How I reproduced it
+
+I wrote `tests/test_notifications.py::test_notification_sent_after_song_rating` and ran `pytest tests/test_notifications.py::test_notification_sent_after_song_rating`. The test creates a current user, a rater user, and a song shared by the current user. Then the rater rates the song through `rate_song(rater_user.id, song.id, 5)`. After that, the test calls `get_notifications(curr_user.id)` and checks for a `song_rated_by_user` notification containing the rater's username and the song title. Before the fix, the test failed because no matching notification existed, so `any(...)` returned `False`.
+
+### How I found the root cause
+
+I traced the rating request path from `routes/songs.py` into `rate_song()` in `services/notification_service.py`. I compared `rate_song()` to `add_to_playlist()` because the user story said playlist-add notifications worked but rating notifications did not. In `add_to_playlist()`, I saw that the service creates a notification near the end of the function after adding the song to the playlist. In `rate_song()`, I saw that the function validates the score, loads the song and rater, creates or updates the `Rating`, commits it, and returns the rating without creating any notification for the song's original sharer.
+
+### The root cause
+
+The root cause was that `rate_song()` saved the rating but did not create a notification for the user who originally shared the song. The `Rating` row was created or updated, so the rating itself existed, but no `Notification` row was inserted for `song.shared_by`. That is why `GET /users/<user_id>/notifications` did not show anything after a friend rated one of that user's shared songs.
+
+### My fix and side-effect check
+
+I added notification creation to `rate_song()` after the rating is saved. The function now checks that the rater is not the original sharer with `if song.shared_by != user_id:` and then calls `create_notification(...)` for `user_id=song.shared_by`. This sends the notification to the original sharer instead of the rater.
+
+After the fix, I reran `pytest tests/test_notifications.py::test_notification_sent_after_song_rating`, and it passed with `1 passed`. I also ran the full test suite with `pytest`. The notification test passed, and the full suite reported `13 passed` and `2 failed`. The two remaining failures were in `tests/test_playlists.py`, so they were separate from the notification change.
